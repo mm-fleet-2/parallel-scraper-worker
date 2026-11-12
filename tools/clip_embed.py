@@ -11,6 +11,17 @@ from PIL import Image, ImageFilter, ImageOps, ImageStat
 
 Image.MAX_IMAGE_PIXELS = None
 AUTO_DARK = 0.36
+ZS_LABELS = [  # (label, prompt) for zero-shot image typing
+    ("storefront", "a photo of a small shop front with a signboard"),
+    ("shelves", "a photo of shop shelves and a counter stocked with packaged products"),
+    ("product", "a close-up photo of a product package or snack packet"),
+    ("food", "a photo of cooked food or a dish on a plate"),
+    ("people", "a photo of people posing or a selfie"),
+    ("logo", "a logo, poster, banner or advertisement graphic"),
+    ("street", "a street scene with a road, vehicles and buildings"),
+    ("empty", "a photo of a ceiling, wall, floor, sky or ground with nothing in it"),
+    ("document", "a screenshot, document, bill or menu with text"),
+]
 
 
 def sas(name):
@@ -61,6 +72,13 @@ def main():
                 err = mask(e); time.sleep(1 + t)
         return row["k"], None, err
 
+    # Zero-shot labels (added 12 Nov 2026, Haldiram vision pilot): the same pass also scores every image
+    # against fixed text prompts; saved as `labels` + `probs` in the npz. Old readers ignore the new arrays.
+    tok = open_clip.get_tokenizer("hf-hub:timm/MobileCLIP2-S0-OpenCLIP")
+    with torch.no_grad():
+        T = m.encode_text(tok([p for _, p in ZS_LABELS])).float()
+        T = T / T.norm(dim=-1, keepdim=True)
+
     t0 = time.time(); K, LUM, E, ERR, buf = [], [], [], [], []
     with cf.ThreadPoolExecutor(a.workers) as ex, torch.no_grad():
         for k, L, x in ex.map(get, rows):
@@ -74,8 +92,11 @@ def main():
     if not K:  # never upload a result when every input failed (a rerun would skip the shard)
         sys.exit(f"{a.shard}: every image failed ({len(ERR)}); nothing uploaded")
     out = io.BytesIO()
-    np.savez(out, k=np.array(K), emb=np.concatenate(E) if E else np.zeros((0, 512), np.float16),
-             lum=np.array(LUM, np.float32), err=np.array(ERR))
+    emb = np.concatenate(E) if E else np.zeros((0, 512), np.float16)
+    I = torch.from_numpy(emb.astype(np.float32)); I = I / I.norm(dim=-1, keepdim=True)
+    probs = (100.0 * I @ T.T).softmax(dim=-1).numpy().astype(np.float16)
+    np.savez(out, k=np.array(K), emb=emb, lum=np.array(LUM, np.float32), err=np.array(ERR),
+             labels=np.array([n for n, _ in ZS_LABELS]), probs=probs)
     try:
         p = s.put(f"{a.out_base.rstrip('/')}/{a.shard}.npz?{ws}", data=out.getvalue(),
                   headers={"x-ms-blob-type": "BlockBlob"}, timeout=300); p.raise_for_status()
