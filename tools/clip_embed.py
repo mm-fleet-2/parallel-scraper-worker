@@ -74,7 +74,9 @@ def main():
 
     # Zero-shot labels (added 12 Nov 2026, Haldiram vision pilot): the same pass also scores every image
     # against fixed text prompts; saved as `labels` + `probs` in the npz. Old readers ignore the new arrays.
-    tok = open_clip.get_tokenizer("hf-hub:timm/MobileCLIP2-S0-OpenCLIP")
+    # The hub tokenizer pads with EOT (49407) and wrecks the text embeddings (food photo -> "empty" 0.85);
+    # the standard OpenCLIP tokenizer pads with 0 (same photo -> "food" 1.00).
+    tok = open_clip.SimpleTokenizer()
     with torch.no_grad():
         T = m.encode_text(tok([p for _, p in ZS_LABELS])).float()
         T = T / T.norm(dim=-1, keepdim=True)
